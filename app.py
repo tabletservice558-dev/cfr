@@ -1,56 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Server web RSS pentru clubferoviar.ro
-Porneste un mic server local care afiseaza ultimele stiri feroviare
-intr-o pagina web, accesibila din browser.
+Server web RSS pentru clubferoviar.ro - versiune pentru hosting (Render.com)
 
-Cum il rulezi in Pydroid 3:
-1. Deschide Pydroid 3.
-2. In terminalul Pydroid (Pip), instaleaza pachetele necesare:
-       pip install flask feedparser requests beautifulsoup4
-3. Copiaza acest fisier in Pydroid (ex: rss_server.py) si apasa Run (▶).
-4. Deschide browserul telefonului si mergi la:
-       http://127.0.0.1:5000
-   (sau apasa direct notificarea/linkul care apare in consola Pydroid)
-5. Pagina se poate reincarca oricand pentru stiri actualizate, sau
-   foloseste butonul "Actualizeaza" de pe pagina.
-
-Optional: daca vrei sa accesezi pagina si de pe alt dispozitiv din
-aceeasi retea Wi-Fi, foloseste adresa IP locala a telefonului in loc
-de 127.0.0.1 (ex: http://192.168.1.23:5000).
+Acest fisier e identic ca functionalitate cu varianta pentru Pydroid, dar
+fara partea de tunel ngrok si detectare IP local (nu sunt necesare cand
+aplicatia ruleaza pe un server din cloud cu URL public permanent).
 """
 
-import sys
 from datetime import datetime
 from xml.sax.saxutils import escape
 
-try:
-    from flask import Flask, render_template_string, Response
-except ImportError:
-    print("Lipseste pachetul 'flask'. Instaleaza-l cu:")
-    print("    pip install flask")
-    sys.exit(1)
-
-try:
-    import feedparser
-except ImportError:
-    print("Lipseste pachetul 'feedparser'. Instaleaza-l cu:")
-    print("    pip install feedparser")
-    sys.exit(1)
-
-try:
-    import requests
-except ImportError:
-    print("Lipseste pachetul 'requests'. Instaleaza-l cu:")
-    print("    pip install requests")
-    sys.exit(1)
-
+from flask import Flask, render_template_string, Response
+import feedparser
+import requests
 
 RSS_URL = "https://clubferoviar.ro/feed/"
 SITE_URL = "https://clubferoviar.ro/"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Android; Mobile) RSS-Reader/1.0"
+    "User-Agent": "Mozilla/5.0 (compatible) RSS-Reader/1.0"
 }
 
 app = Flask(__name__)
@@ -89,7 +57,7 @@ PAGINA_HTML = """
   .stire h2 { margin: 0 0 6px; font-size: 1.05em; }
   .stire h2 a { color: #0a3d62; text-decoration: none; }
   .stire .data { font-size: 0.8em; color: #888; margin-bottom: 6px; }
-  .stire .rezumat { font-size: 0.92em; color: #444; }
+  .stire .rezumat { font-size: 0.92em; color: #444; white-space: pre-line; }
   .goale { text-align: center; padding: 30px; color: #888; }
   .actualizeaza {
     display: block;
@@ -120,7 +88,7 @@ PAGINA_HTML = """
     <div class="stire">
       <h2><a href="{{ s.link }}" target="_blank">{{ s.titlu }}</a></h2>
       {% if s.data %}<div class="data">{{ s.data }}</div>{% endif %}
-      {% if s.rezumat %}<div class="rezumat">{{ s.rezumat }}</div>{% endif %}
+      {% if s.continut %}<div class="rezumat">{{ s.continut }}</div>{% endif %}
     </div>
     {% endfor %}
   {% else %}
@@ -133,27 +101,63 @@ PAGINA_HTML = """
 """
 
 
-def ia_stiri_din_rss(numar_stiri=20):
+def ia_continut_complet(link):
+    """Deschide pagina articolului si extrage textul complet al stirii
+    (nu doar rezumatul din RSS)."""
+    from bs4 import BeautifulSoup
+
+    raspuns = requests.get(link, headers=HEADERS, timeout=15)
+    raspuns.raise_for_status()
+    soup = BeautifulSoup(raspuns.content, "html.parser")
+
+    # WordPress foloseste de obicei una din aceste clase pentru corpul articolului
+    zona = (
+        soup.select_one(".entry-content")
+        or soup.select_one(".post-content")
+        or soup.select_one("article .content")
+        or soup.select_one("article")
+    )
+    if not zona:
+        return ""
+
+    # scoate scripturi, reclame, related-posts etc.
+    for tag in zona.select("script, style, .sharedaddy, .jp-relatedposts, .related-posts"):
+        tag.decompose()
+
+    paragrafe = [p.get_text(" ", strip=True) for p in zona.find_all(["p", "h2", "h3", "li"])]
+    paragrafe = [p for p in paragrafe if p]
+    return "\n\n".join(paragrafe)
+
+
+def ia_stiri_din_rss():
     raspuns = requests.get(RSS_URL, headers=HEADERS, timeout=15)
     raspuns.raise_for_status()
     feed = feedparser.parse(raspuns.content)
 
     stiri = []
-    for articol in feed.entries[:numar_stiri]:
+    for articol in feed.entries:
+        link = articol.get("link", "#")
+
         rezumat = articol.get("summary", "")
         rezumat = rezumat.replace("\n", " ").strip()
-        if len(rezumat) > 220:
-            rezumat = rezumat[:220].rstrip() + "..."
+
+        try:
+            continut = ia_continut_complet(link)
+        except Exception as e:
+            print(f"Nu am putut lua continutul complet pentru {link}: {e}")
+            continut = ""
+
         stiri.append({
             "titlu": articol.get("title", "Fara titlu"),
-            "link": articol.get("link", "#"),
+            "link": link,
             "data": articol.get("published", ""),
             "rezumat": rezumat,
+            "continut": continut or rezumat,
         })
     return stiri
 
 
-def ia_stiri_din_pagina(numar_stiri=20):
+def ia_stiri_din_pagina():
     from bs4 import BeautifulSoup
 
     raspuns = requests.get(SITE_URL, headers=HEADERS, timeout=15)
@@ -167,9 +171,18 @@ def ia_stiri_din_pagina(numar_stiri=20):
         link = tag.get("href", "")
         if titlu and link.startswith("http") and link not in vazute:
             vazute.add(link)
-            stiri.append({"titlu": titlu, "link": link, "data": "", "rezumat": ""})
-        if len(stiri) >= numar_stiri:
-            break
+            try:
+                continut = ia_continut_complet(link)
+            except Exception as e:
+                print(f"Nu am putut lua continutul complet pentru {link}: {e}")
+                continut = ""
+            stiri.append({
+                "titlu": titlu,
+                "link": link,
+                "data": "",
+                "rezumat": "",
+                "continut": continut,
+            })
     return stiri
 
 
@@ -188,37 +201,6 @@ def obtine_stiri():
         return []
 
 
-@app.route("/")
-def index():
-    stiri = obtine_stiri()
-    ora = datetime.now().strftime("%d.%m.%Y %H:%M")
-    return render_template_string(PAGINA_HTML, stiri=stiri, ora=ora)
-
-
-import os
-import socket
-
-
-def ia_ip_local():
-    """Incearca sa afle adresa IP locala a telefonului in retea (nu 127.0.0.1)."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return None
-
-# Unde se salveaza fisierul .xml. Pe Android, in Pydroid, folderul curent
-# de lucru e de obicei accesibil; daca vrei sa il vezi si in Fisiere/
-# Descarcari, schimba calea de mai jos cu ceva de tipul:
-#   "/storage/emulated/0/Download/rss_clubferoviar.xml"
-# (ai nevoie ca Pydroid sa aiba permisiune de stocare, activata din
-# Setari Android > Aplicatii > Pydroid 3 > Permisiuni > Fisiere)
-CALE_FISIER_XML = "rss_clubferoviar.xml"
-
-
 def genereaza_xml(stiri):
     items_xml = []
     for s in stiri:
@@ -228,11 +210,12 @@ def genereaza_xml(stiri):
       <link>{escape(s['link'])}</link>
       <guid>{escape(s['link'])}</guid>
       {f"<pubDate>{escape(s['data'])}</pubDate>" if s['data'] else ""}
-      <description>{escape(s['rezumat'])}</description>
+      <description>{escape(s['continut'])}</description>
+      <content:encoded><![CDATA[{s['continut']}]]></content:encoded>
     </item>""")
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
     <title>Club Feroviar - Stiri</title>
     <link>{escape(SITE_URL)}</link>
@@ -244,91 +227,23 @@ def genereaza_xml(stiri):
 </rss>"""
 
 
-def salveaza_xml(xml, cale=CALE_FISIER_XML):
-    try:
-        with open(cale, "w", encoding="utf-8") as f:
-            f.write(xml)
-        print(f"Fisier XML salvat la: {os.path.abspath(cale)}")
-        return True
-    except Exception as e:
-        print(f"Nu am putut salva fisierul XML: {e}")
-        return False
+@app.route("/")
+def index():
+    stiri = obtine_stiri()
+    ora = datetime.now().strftime("%d.%m.%Y %H:%M")
+    return render_template_string(PAGINA_HTML, stiri=stiri, ora=ora)
 
 
 @app.route("/rss.xml")
 @app.route("/feed")
 def rss_xml():
-    """Genereaza un feed RSS 2.0 valid, ce poate fi adaugat direct
-    intr-un cititor RSS (Feedly, Reeder, NetNewsWire, Podcast Addict,
-    Inoreader etc.), si il salveaza si local ca fisier .xml."""
     stiri = obtine_stiri()
     xml = genereaza_xml(stiri)
-    salveaza_xml(xml)
     return Response(xml, mimetype="application/rss+xml")
 
 
-# Token-ul tau gratuit de pe https://dashboard.ngrok.com/get-started/your-authtoken
-# Lasa gol ("") daca vrei ca serverul sa mearga doar in reteaua locala.
-NGROK_AUTHTOKEN = "3GeCVIThNZ4Nie7yYDmWLvUiZwo_3RCzyrWp6CvwMEJbzvjAP"
-
-# Domeniu static gratuit (optional). Il obtii din dashboard ngrok:
-# Universal Gateway -> Domains -> Create domain (ex: "ceva-random.ngrok-free.app")
-# Daca il completezi aici, URL-ul public NU se mai schimba la fiecare pornire.
-NGROK_DOMAIN = "portable-dispersed-appointee.ngrok-free.dev"
-
-
-def porneste_tunel_public(port=5000):
-    """Porneste un tunel ngrok, ca serverul sa fie accesibil de pe internet,
-    nu doar din reteaua Wi-Fi locala. Returneaza URL-ul public sau None."""
-    if not NGROK_AUTHTOKEN:
-        print("NGROK_AUTHTOKEN nu e setat -> serverul ramane accesibil doar local.")
-        print("Pentru acces de pe internet, seteaza NGROK_AUTHTOKEN in script.")
-        return None
-
-    try:
-        from pyngrok import ngrok
-    except ImportError:
-        print("Lipseste pachetul 'pyngrok'. Instaleaza-l cu:")
-        print("    pip install pyngrok")
-        return None
-
-    try:
-        ngrok.set_auth_token(NGROK_AUTHTOKEN)
-        if NGROK_DOMAIN:
-            tunel = ngrok.connect(port, "http", domain=NGROK_DOMAIN)
-        else:
-            tunel = ngrok.connect(port, "http")
-        return tunel.public_url
-    except Exception as e:
-        print(f"Nu am putut porni tunelul public: {e}")
-        return None
-
-
 if __name__ == "__main__":
-    print("Pornesc serverul...")
-    print("Generez fisierul XML initial...")
-    salveaza_xml(genereaza_xml(obtine_stiri()))
-
-    ip_local = ia_ip_local()
-    print("\n" + "=" * 50)
-    if ip_local:
-        print(f"Adresa IP a telefonului in retea: {ip_local}")
-        print(f"Foloseste asta in TT-RSS ca URL de feed:")
-        print(f"   http://{ip_local}:5000/rss.xml")
-    else:
-        print("Nu am putut detecta automat IP-ul local.")
-        print("Cauta-l manual in Setari > Wi-Fi > (numele retelei) > detalii IP.")
-    print("=" * 50 + "\n")
-
-    print("Pagina web (doar pe acest telefon): http://127.0.0.1:5000")
-    print("Feed RSS (doar pe acest telefon):   http://127.0.0.1:5000/rss.xml")
-
-    url_public = porneste_tunel_public(5000)
-    if url_public:
-        print("\n" + "=" * 50)
-        print(f"URL public (functioneaza de oriunde):")
-        print(f"   {url_public}/rss.xml")
-        print("Foloseste acest link in TT-RSS de pe orice retea/device.")
-        print("=" * 50 + "\n")
-
+    # Foloseste asta doar pentru testare locala pe calculator.
+    # Pe Render, aplicatia e pornita de gunicorn (vezi Procfile), nu de aici.
     app.run(host="0.0.0.0", port=5000, debug=False)
+)
